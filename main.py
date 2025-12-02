@@ -69,6 +69,17 @@ class LogMessage(BaseModel):
     follow_up_needed: Optional[bool] = False
 
 
+class LogMessageFromDashboard(BaseModel):
+    phone: str
+    message: str
+    direction: str  # "outgoing"
+    message_type: Optional[str] = "text"
+    timestamp: str
+    follow_up_needed: Optional[bool] = False
+    notes: Optional[str] = ""
+    handled_by: Optional[str] = ""
+
+
 class ContactSummary(BaseModel):
     phone: str
     client_name: Optional[str]
@@ -161,6 +172,53 @@ def log_message(payload: LogMessage, db: Session = Depends(get_db)):
     return msg
 
 
+@app.post("/log_message")
+def log_message_from_dashboard(payload: LogMessageFromDashboard, db: Session = Depends(get_db)):
+    """
+    New endpoint specifically for dashboard-sent messages.
+    Stores messages sent via the dashboard UI.
+    """
+    try:
+        # Parse timestamp
+        if isinstance(payload.timestamp, str):
+            ts = datetime.fromisoformat(payload.timestamp.replace('Z', '+00:00'))
+        else:
+            ts = datetime.utcnow()
+        
+        # Normalize direction
+        norm_direction = normalize_direction(payload.direction)
+        
+        # Get client name from existing messages if available
+        existing_msg = db.query(Message).filter(Message.phone == payload.phone).first()
+        client_name = existing_msg.client_name if existing_msg else None
+        
+        msg = Message(
+            phone=payload.phone,
+            client_name=client_name,
+            direction=norm_direction,
+            message=payload.message,
+            media_url=None,
+            automation="Dashboard",  # Mark as sent from dashboard
+            timestamp=ts,
+            follow_up_needed=payload.follow_up_needed or False,
+            handled_by=payload.handled_by or "Dashboard User",
+            notes=payload.notes or "",
+        )
+        
+        db.add(msg)
+        db.commit()
+        db.refresh(msg)
+        
+        return {
+            "status": "success",
+            "message": "Message logged successfully",
+            "id": msg.id
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to log message: {str(e)}")
+
+
 @app.get("/contacts", response_model=List[ContactSummary])
 def list_contacts(
     only_follow_up: bool = Query(False),
@@ -205,11 +263,22 @@ def list_contacts(
 
 
 @app.get("/conversation/{phone}", response_model=List[ConversationMessage])
-def get_conversation(phone: str, db: Session = Depends(get_db)):
+def get_conversation(
+    phone: str, 
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db)
+):
+    """
+    Get conversation messages with pagination support.
+    Returns messages in ascending order (oldest first).
+    """
     msgs = (
         db.query(Message)
         .filter(Message.phone == phone)
         .order_by(Message.timestamp.asc())
+        .limit(limit)
+        .offset(offset)
         .all()
     )
     return [
@@ -253,7 +322,7 @@ def update_message(
 
 
 # ----------------------------------------------------------------------
-# NEW DELETE ENDPOINTS
+# DELETE ENDPOINTS
 # ----------------------------------------------------------------------
 
 @app.delete("/message/{msg_id}", response_model=DeleteResponse)
@@ -299,11 +368,12 @@ def delete_conversation(phone: str, db: Session = Depends(get_db)):
 def root():
     return {
         "message": "WhatsApp Chat Logger API",
-        "version": "2.0",
+        "version": "2.1",
         "endpoints": {
             "log": "POST /log",
+            "log_message": "POST /log_message (for dashboard)",
             "contacts": "GET /contacts",
-            "conversation": "GET /conversation/{phone}",
+            "conversation": "GET /conversation/{phone}?limit=50&offset=0",
             "update": "PATCH /message/{msg_id}",
             "delete_message": "DELETE /message/{msg_id}",
             "delete_conversation": "DELETE /conversation/{phone}"
