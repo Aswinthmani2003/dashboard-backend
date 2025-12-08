@@ -9,38 +9,36 @@ from pydantic import BaseModel
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
 # ----------------------------------------------------------------------
-# MongoDB setup
+# MongoDB setup (NO FALLBACK — MUST BE SET IN ENV)
 # ----------------------------------------------------------------------
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise RuntimeError("❌ MONGO_URI environment variable is NOT set. Set it in Render.")
 
 client = MongoClient(MONGO_URI)
-db = client["dashboard_db"]          # choose any db name you like
-messages_col = db["messages"]        # main collection for messages
+db = client["dashboard_db"]          # Database name
+messages_col = db["messages"]        # Collection name
 
-# Ensure useful indexes
+# Indexes (important for speed)
 messages_col.create_index([("id", ASCENDING)], unique=True)
-messages_col.create_index([("phone", ASCENDING), ("timestamp", DESCENDING)])
+messages_col.create_index([("phone", ASCENDING)])
+messages_col.create_index([("timestamp", DESCENDING)])
 
 
 def get_next_message_id() -> int:
-    """
-    Simple auto-increment for message id.
-    Good enough for your current low-volume use case.
-    """
+    """Auto-increment integer ID like SQLite version."""
     doc = messages_col.find_one(sort=[("id", -1)], projection={"id": 1})
-    if doc and "id" in doc:
-        return int(doc["id"]) + 1
-    return 1
+    return int(doc["id"]) + 1 if doc else 1
 
 
 # ----------------------------------------------------------------------
-# FastAPI app + CORS
+# FastAPI + CORS
 # ----------------------------------------------------------------------
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later if needed
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,8 +61,7 @@ class LogMessage(BaseModel):
 class LogMessageFromDashboard(BaseModel):
     phone: str
     message: str
-    direction: str  # "outgoing"
-    message_type: Optional[str] = "text"
+    direction: str
     timestamp: str
     follow_up_needed: Optional[bool] = False
     notes: Optional[str] = ""
@@ -110,25 +107,22 @@ class DeleteResponse(BaseModel):
 # Helpers
 # ----------------------------------------------------------------------
 def normalize_direction(raw: str) -> str:
-    """
-    Normalise to:
-    - "user"  (client message)
-    - "bot"   (your automation / agent message)
-    """
-    if raw is None:
+    """Normalize Make.com and dashboard values -> user/bot."""
+    if not raw:
         raise HTTPException(status_code=400, detail="direction is required")
 
-    value = raw.strip().lower()
+    raw = raw.strip().lower()
 
-    if value in {"user", "incoming", "client"}:
+    if raw in {"user", "incoming", "client"}:
         return "user"
-    if value in {"bot", "outgoing", "agent"}:
+    if raw in {"bot", "outgoing", "agent"}:
         return "bot"
 
     raise HTTPException(status_code=400, detail=f"Invalid direction: {raw}")
 
 
-def doc_to_conversation_message(doc: Dict[str, Any]) -> ConversationMessage:
+def doc_to_message(doc: Dict[str, Any]) -> ConversationMessage:
+    """Convert MongoDB doc to API schema."""
     return ConversationMessage(
         id=int(doc["id"]),
         phone=doc["phone"],
@@ -145,10 +139,13 @@ def doc_to_conversation_message(doc: Dict[str, Any]) -> ConversationMessage:
 
 
 # ----------------------------------------------------------------------
-# API routes
+# ROUTES
 # ----------------------------------------------------------------------
+
+# 🔹 POST /log  (Make.com → backend)
 @app.post("/log", response_model=ConversationMessage)
 def log_message(payload: LogMessage):
+
     norm_direction = normalize_direction(payload.direction)
 
     doc = {
@@ -166,81 +163,69 @@ def log_message(payload: LogMessage):
     }
 
     messages_col.insert_one(doc)
-    return doc_to_conversation_message(doc)
+    return doc_to_message(doc)
 
 
+# 🔹 POST /log_message (Dashboard → backend)
 @app.post("/log_message")
 def log_message_from_dashboard(payload: LogMessageFromDashboard):
-    """
-    Endpoint specifically for dashboard-sent messages.
-    """
+
+    # Parse timestamp
     try:
-        # Parse timestamp
-        if isinstance(payload.timestamp, str):
-            ts = datetime.fromisoformat(payload.timestamp.replace("Z", "+00:00"))
-        else:
-            ts = datetime.utcnow()
+        ts = datetime.fromisoformat(payload.timestamp.replace("Z", "+00:00"))
+    except:
+        ts = datetime.utcnow()
 
-        norm_direction = normalize_direction(payload.direction)
+    norm_direction = normalize_direction(payload.direction)
 
-        # Get client name from existing messages if available
-        existing = messages_col.find_one({"phone": payload.phone})
-        client_name = existing.get("client_name") if existing else None
+    # Get client name if already exists
+    existing = messages_col.find_one({"phone": payload.phone})
+    client_name = existing.get("client_name") if existing else None
 
-        doc = {
-            "id": get_next_message_id(),
-            "phone": payload.phone,
-            "client_name": client_name,
-            "direction": norm_direction,
-            "message": payload.message,
-            "media_url": None,
-            "automation": "Dashboard",
-            "timestamp": ts,
-            "follow_up_needed": payload.follow_up_needed or False,
-            "handled_by": payload.handled_by or "Dashboard User",
-            "notes": payload.notes or "",
-        }
+    doc = {
+        "id": get_next_message_id(),
+        "phone": payload.phone,
+        "client_name": client_name,
+        "direction": norm_direction,
+        "message": payload.message,
+        "media_url": None,
+        "automation": "Dashboard",
+        "timestamp": ts,
+        "follow_up_needed": payload.follow_up_needed or False,
+        "handled_by": payload.handled_by or "Dashboard User",
+        "notes": payload.notes or "",
+    }
 
-        messages_col.insert_one(doc)
+    messages_col.insert_one(doc)
 
-        return {
-            "status": "success",
-            "message": "Message logged successfully",
-            "id": doc["id"],
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to log message: {str(e)}")
+    return {"status": "success", "id": doc["id"]}
 
 
+# 🔹 GET /contacts
 @app.get("/contacts", response_model=List[ContactSummary])
-def list_contacts(
-    only_follow_up: bool = Query(False),
-):
-    # Fetch all messages, sorted like the SQL version
+def list_contacts(only_follow_up: bool = Query(False)):
+
     docs = list(
-        messages_col.find().sort(
-            [("phone", ASCENDING), ("timestamp", DESCENDING)]
-        )
+        messages_col.find().sort([("phone", ASCENDING), ("timestamp", DESCENDING)])
     )
 
-    latest_per_phone: Dict[str, Dict[str, Any]] = {}
-    followup_flags: Dict[str, bool] = {}
+    latest_per_phone = {}
+    followups = {}
 
     for m in docs:
         phone = m["phone"]
         if phone not in latest_per_phone:
             latest_per_phone[phone] = m
-        if phone not in followup_flags:
-            followup_flags[phone] = False
+        if phone not in followups:
+            followups[phone] = False
         if m.get("follow_up_needed"):
-            followup_flags[phone] = True
+            followups[phone] = True
 
-    contacts: List[ContactSummary] = []
+    contacts = []
     for phone, m in latest_per_phone.items():
-        fu = followup_flags.get(phone, False)
+        fu = followups[phone]
         if only_follow_up and not fu:
             continue
-
         contacts.append(
             ContactSummary(
                 phone=phone,
@@ -252,20 +237,14 @@ def list_contacts(
             )
         )
 
-    contacts.sort(key=lambda c: c.last_time, reverse=True)
+    contacts.sort(key=lambda x: x.last_time, reverse=True)
     return contacts
 
 
+# 🔹 GET /conversation/{phone}
 @app.get("/conversation/{phone}", response_model=List[ConversationMessage])
-def get_conversation(
-    phone: str,
-    limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-):
-    """
-    Get conversation messages with pagination support.
-    Returns messages in ascending order (oldest first).
-    """
+def get_conversation(phone: str, limit: int = 50, offset: int = 0):
+
     cursor = (
         messages_col.find({"phone": phone})
         .sort("timestamp", ASCENDING)
@@ -273,41 +252,38 @@ def get_conversation(
         .limit(limit)
     )
     docs = list(cursor)
-    return [doc_to_conversation_message(m) for m in docs]
+    return [doc_to_message(d) for d in docs]
 
 
+# 🔹 PATCH /message/{msg_id}
 @app.patch("/message/{msg_id}", response_model=ConversationMessage)
-def update_message(
-    msg_id: int,
-    payload: UpdateMessage,
-):
+def update_message(msg_id: int, payload: UpdateMessage):
+
     msg = messages_col.find_one({"id": int(msg_id)})
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    update: Dict[str, Any] = {}
+    updates = {}
+
     if payload.follow_up_needed is not None:
-        update["follow_up_needed"] = payload.follow_up_needed
+        updates["follow_up_needed"] = payload.follow_up_needed
     if payload.handled_by is not None:
-        update["handled_by"] = payload.handled_by
+        updates["handled_by"] = payload.handled_by
     if payload.notes is not None:
-        update["notes"] = payload.notes
+        updates["notes"] = payload.notes
 
-    if update:
-        messages_col.update_one({"id": int(msg_id)}, {"$set": update})
-        msg.update(update)
+    if updates:
+        messages_col.update_one({"id": int(msg_id)}, {"$set": updates})
+        msg.update(updates)
 
-    return doc_to_conversation_message(msg)
+    return doc_to_message(msg)
 
 
-# ----------------------------------------------------------------------
-# DELETE ENDPOINTS
-# ----------------------------------------------------------------------
+# 🔹 DELETE /message/{msg_id}
 @app.delete("/message/{msg_id}", response_model=DeleteResponse)
 def delete_message(msg_id: int):
-    """Delete a single message by ID"""
-    result = messages_col.delete_one({"id": int(msg_id)})
 
+    result = messages_col.delete_one({"id": int(msg_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Message not found")
 
@@ -318,13 +294,13 @@ def delete_message(msg_id: int):
     )
 
 
+# 🔹 DELETE /conversation/{phone}
 @app.delete("/conversation/{phone}", response_model=DeleteResponse)
 def delete_conversation(phone: str):
-    """Delete all messages for a specific phone number"""
-    result = messages_col.delete_many({"phone": phone})
 
+    result = messages_col.delete_many({"phone": phone})
     if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="No messages found for this phone number")
+        raise HTTPException(status_code=404, detail="No messages found for this phone")
 
     return DeleteResponse(
         success=True,
@@ -339,15 +315,6 @@ def delete_conversation(phone: str):
 @app.get("/")
 def root():
     return {
-        "message": "WhatsApp Chat Logger API",
-        "version": "3.0-mongo",
-        "endpoints": {
-            "log": "POST /log",
-            "log_message": "POST /log_message (for dashboard)",
-            "contacts": "GET /contacts",
-            "conversation": "GET /conversation/{phone}?limit=50&offset=0",
-            "update": "PATCH /message/{msg_id}",
-            "delete_message": "DELETE /message/{msg_id}",
-            "delete_conversation": "DELETE /conversation/{phone}",
-        },
+        "message": "WhatsApp Chat Logger API (MongoDB Version)",
+        "version": "3.0",
     }
