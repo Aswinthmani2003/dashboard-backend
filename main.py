@@ -107,15 +107,15 @@ class DeleteResponse(BaseModel):
 # Helpers
 # ----------------------------------------------------------------------
 def normalize_direction(raw: str) -> str:
-    """Normalize Make.com and dashboard values -> user/bot."""
+    """Normalize Make.com values -> user/bot (ONLY for webhook /log)."""
     if not raw:
         raise HTTPException(status_code=400, detail="direction is required")
 
-    raw = raw.strip().lower()
+    raw_l = raw.strip().lower()
 
-    if raw in {"user", "incoming", "client"}:
+    if raw_l in {"user", "incoming", "client"}:
         return "user"
-    if raw in {"bot", "outgoing", "agent"}:
+    if raw_l in {"bot", "outgoing", "agent"}:
         return "bot"
 
     raise HTTPException(status_code=400, detail=f"Invalid direction: {raw}")
@@ -173,10 +173,12 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
     # Parse timestamp
     try:
         ts = datetime.fromisoformat(payload.timestamp.replace("Z", "+00:00"))
-    except:
+    except Exception:
         ts = datetime.utcnow()
 
-    norm_direction = normalize_direction(payload.direction)
+    # IMPORTANT CHANGE:
+    # For dashboard messages, KEEP direction as-is (e.g. "Dashboard User")
+    direction = (payload.direction or "Dashboard User").strip() or "Dashboard User"
 
     # Get client name if already exists
     existing = messages_col.find_one({"phone": payload.phone})
@@ -186,7 +188,7 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
         "id": get_next_message_id(),
         "phone": payload.phone,
         "client_name": client_name,
-        "direction": norm_direction,
+        "direction": direction,                 # <-- stored as "Dashboard User"
         "message": payload.message,
         "media_url": None,
         "automation": "Dashboard",
@@ -209,8 +211,8 @@ def list_contacts(only_follow_up: bool = Query(False)):
         messages_col.find().sort([("phone", ASCENDING), ("timestamp", DESCENDING)])
     )
 
-    latest_per_phone = {}
-    followups = {}
+    latest_per_phone: Dict[str, Dict[str, Any]] = {}
+    followups: Dict[str, bool] = {}
 
     for m in docs:
         phone = m["phone"]
@@ -221,7 +223,7 @@ def list_contacts(only_follow_up: bool = Query(False)):
         if m.get("follow_up_needed"):
             followups[phone] = True
 
-    contacts = []
+    contacts: List[ContactSummary] = []
     for phone, m in latest_per_phone.items():
         fu = followups[phone]
         if only_follow_up and not fu:
@@ -247,7 +249,7 @@ def get_conversation(phone: str, limit: int = 50, offset: int = 0):
 
     cursor = (
         messages_col.find({"phone": phone})
-        .sort("timestamp", ASCENDING)
+        .sort("timestamp", ASCENDING)  # oldest → newest for proper chat order
         .skip(offset)
         .limit(limit)
     )
@@ -263,7 +265,7 @@ def update_message(msg_id: int, payload: UpdateMessage):
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    updates = {}
+    updates: Dict[str, Any] = {}
 
     if payload.follow_up_needed is not None:
         updates["follow_up_needed"] = payload.follow_up_needed
