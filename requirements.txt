@@ -5,4 +5,4 @@ pydantic
 python-multipart
 requests
 cd 
-pymongo
+pymongo[srv]
