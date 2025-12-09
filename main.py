@@ -1,8 +1,8 @@
 # main.py
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-
 import os
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,12 +17,16 @@ if not MONGO_URI:
 
 client = MongoClient(MONGO_URI)
 db = client["dashboard_db"]          # Database name
-messages_col = db["messages"]        # Collection name
+
+messages_col = db["messages"]        # Collection: all messages
+automation_col = db["automation_settings"]  # Collection: per-phone automation flag
 
 # Indexes (important for speed)
 messages_col.create_index([("id", ASCENDING)], unique=True)
 messages_col.create_index([("phone", ASCENDING)])
 messages_col.create_index([("timestamp", DESCENDING)])
+
+automation_col.create_index([("phone", ASCENDING)], unique=True)
 
 
 def get_next_message_id() -> int:
@@ -61,11 +65,12 @@ class LogMessage(BaseModel):
 class LogMessageFromDashboard(BaseModel):
     phone: str
     message: str
-    direction: str
     timestamp: str
+    # optional – we ignore raw direction and handled_by; keep them for backward-compat
+    direction: Optional[str] = "dashboard"
     follow_up_needed: Optional[bool] = False
     notes: Optional[str] = ""
-    handled_by: Optional[str] = ""
+    handled_by: Optional[str] = "Dashboard User"
 
 
 class ContactSummary(BaseModel):
@@ -103,19 +108,29 @@ class DeleteResponse(BaseModel):
     deleted_count: Optional[int] = None
 
 
+# --- Automation toggle models ---
+class AutomationStatus(BaseModel):
+    phone: str
+    automation_enabled: bool
+
+
+class AutomationUpdate(BaseModel):
+    automation_enabled: bool
+
+
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
 def normalize_direction(raw: str) -> str:
-    """Normalize Make.com values -> user/bot (ONLY for webhook /log)."""
+    """Normalize Make.com values -> 'user' or 'bot'."""
     if not raw:
         raise HTTPException(status_code=400, detail="direction is required")
 
-    raw_l = raw.strip().lower()
+    raw = raw.strip().lower()
 
-    if raw_l in {"user", "incoming", "client"}:
+    if raw in {"user", "incoming", "client"}:
         return "user"
-    if raw_l in {"bot", "outgoing", "agent"}:
+    if raw in {"bot", "outgoing", "agent"}:
         return "bot"
 
     raise HTTPException(status_code=400, detail=f"Invalid direction: {raw}")
@@ -138,11 +153,19 @@ def doc_to_message(doc: Dict[str, Any]) -> ConversationMessage:
     )
 
 
+def get_automation_enabled_for_phone(phone: str) -> bool:
+    """Return True/False if automation is enabled for this phone. Default = True."""
+    doc = automation_col.find_one({"phone": phone})
+    if not doc:
+        return True
+    return bool(doc.get("automation_enabled", True))
+
+
 # ----------------------------------------------------------------------
 # ROUTES
 # ----------------------------------------------------------------------
 
-# 🔹 POST /log  (Make.com → backend)
+# 🔹 POST /log  (Make.com → backend, bot + user messages)
 @app.post("/log", response_model=ConversationMessage)
 def log_message(payload: LogMessage):
 
@@ -166,21 +189,20 @@ def log_message(payload: LogMessage):
     return doc_to_message(doc)
 
 
-# 🔹 POST /log_message (Dashboard → backend)
+# 🔹 POST /log_message (Dashboard → backend, manual replies)
 @app.post("/log_message")
 def log_message_from_dashboard(payload: LogMessageFromDashboard):
 
-    # Parse timestamp
+    # Parse timestamp from ISO string
     try:
         ts = datetime.fromisoformat(payload.timestamp.replace("Z", "+00:00"))
     except Exception:
         ts = datetime.utcnow()
 
-    # IMPORTANT CHANGE:
-    # For dashboard messages, KEEP direction as-is (e.g. "Dashboard User")
-    direction = (payload.direction or "Dashboard User").strip() or "Dashboard User"
+    # Always store dashboard messages with direction = "dashboard"
+    direction = "dashboard"
 
-    # Get client name if already exists
+    # Get client name if already exists from any previous message
     existing = messages_col.find_one({"phone": payload.phone})
     client_name = existing.get("client_name") if existing else None
 
@@ -188,7 +210,7 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
         "id": get_next_message_id(),
         "phone": payload.phone,
         "client_name": client_name,
-        "direction": direction,                 # <-- stored as "Dashboard User"
+        "direction": direction,
         "message": payload.message,
         "media_url": None,
         "automation": "Dashboard",
@@ -249,7 +271,7 @@ def get_conversation(phone: str, limit: int = 50, offset: int = 0):
 
     cursor = (
         messages_col.find({"phone": phone})
-        .sort("timestamp", ASCENDING)  # oldest → newest for proper chat order
+        .sort("timestamp", ASCENDING)  # oldest -> newest
         .skip(offset)
         .limit(limit)
     )
@@ -311,6 +333,31 @@ def delete_conversation(phone: str):
     )
 
 
+# 🔹 GET /automation/{phone}
+@app.get("/automation/{phone}", response_model=AutomationStatus)
+def get_automation(phone: str):
+    enabled = get_automation_enabled_for_phone(phone)
+    return AutomationStatus(phone=phone, automation_enabled=enabled)
+
+
+# 🔹 PATCH /automation/{phone}
+@app.patch("/automation/{phone}", response_model=AutomationStatus)
+def set_automation(phone: str, update: AutomationUpdate):
+    enabled = bool(update.automation_enabled)
+    automation_col.update_one(
+        {"phone": phone},
+        {
+            "$set": {
+                "phone": phone,
+                "automation_enabled": enabled,
+                "updated_at": datetime.utcnow(),
+            }
+        },
+        upsert=True,
+    )
+    return AutomationStatus(phone=phone, automation_enabled=enabled)
+
+
 # ----------------------------------------------------------------------
 # ROOT
 # ----------------------------------------------------------------------
@@ -318,5 +365,5 @@ def delete_conversation(phone: str):
 def root():
     return {
         "message": "WhatsApp Chat Logger API (MongoDB Version)",
-        "version": "3.0",
+        "version": "3.1",
     }
