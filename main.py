@@ -21,6 +21,7 @@ db = client["dashboard_db"]          # Database name
 
 messages_col = db["messages"]        # Collection: all messages
 automation_col = db["automation_settings"]  # Collection: per-phone automation flag
+presence_col = db["dashboard_presence"]
 
 # Indexes (important for speed)
 messages_col.create_index([("id", ASCENDING)], unique=True)
@@ -28,7 +29,7 @@ messages_col.create_index([("phone", ASCENDING)])
 messages_col.create_index([("timestamp", DESCENDING)])
 
 automation_col.create_index([("phone", ASCENDING)], unique=True)
-
+presence_col.create_index([("phone", ASCENDING)], unique=True)
 
 def get_next_message_id() -> int:
     """Auto-increment integer ID like SQLite version."""
@@ -81,6 +82,7 @@ class ContactSummary(BaseModel):
     last_time: datetime
     last_direction: str
     follow_up_open: bool
+    unread: bool
 
 
 class ConversationMessage(BaseModel):
@@ -224,6 +226,20 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
     messages_col.insert_one(doc)
 
     return {"status": "success", "id": doc["id"]}
+    
+@app.post("/seen/{phone}")
+def mark_chat_seen(phone: str):
+    presence_col.update_one(
+        {"phone": phone},
+        {
+            "$set": {
+                "phone": phone,
+                "last_seen_at": datetime.utcnow()
+            }
+        },
+        upsert=True
+    )
+    return {"success": True}
 
 
 # 🔹 GET /contacts
@@ -247,10 +263,20 @@ def list_contacts(only_follow_up: bool = Query(False)):
             followups[phone] = True
 
     contacts: List[ContactSummary] = []
+
     for phone, m in latest_per_phone.items():
         fu = followups[phone]
         if only_follow_up and not fu:
             continue
+
+        presence = presence_col.find_one({"phone": phone})
+        last_seen_at = presence.get("last_seen_at") if presence else None
+
+        unread = (
+            m["direction"] == "user" and
+            (not last_seen_at or m["timestamp"] > last_seen_at)
+        )
+
         contacts.append(
             ContactSummary(
                 phone=phone,
@@ -259,6 +285,7 @@ def list_contacts(only_follow_up: bool = Query(False)):
                 last_time=m["timestamp"],
                 last_direction=m["direction"],
                 follow_up_open=fu,
+                unread=unread
             )
         )
 
