@@ -21,7 +21,6 @@ db = client["dashboard_db"]          # Database name
 
 messages_col = db["messages"]        # Collection: all messages
 automation_col = db["automation_settings"]  # Collection: per-phone automation flag
-filters_col = db["exclusion_filters"]  # NEW: Collection for ID exclusion filters
 
 # Indexes (important for speed)
 messages_col.create_index([("id", ASCENDING)], unique=True)
@@ -29,51 +28,12 @@ messages_col.create_index([("phone", ASCENDING)])
 messages_col.create_index([("timestamp", DESCENDING)])
 
 automation_col.create_index([("phone", ASCENDING)], unique=True)
-filters_col.create_index([("filter_type", ASCENDING)])  # NEW: Index for filters
 
 
 def get_next_message_id() -> int:
     """Auto-increment integer ID like SQLite version."""
     doc = messages_col.find_one(sort=[("id", -1)], projection={"id": 1})
     return int(doc["id"]) + 1 if doc else 1
-
-
-# ----------------------------------------------------------------------
-# NEW: Helper functions for ID exclusion filters
-# ----------------------------------------------------------------------
-def get_excluded_ids() -> List[str]:
-    """Get list of exact IDs to exclude."""
-    doc = filters_col.find_one({"filter_type": "exclude_exact_ids"})
-    return doc.get("ids", []) if doc else []
-
-
-def get_excluded_id_patterns() -> List[str]:
-    """Get list of substring patterns to exclude IDs containing these values."""
-    doc = filters_col.find_one({"filter_type": "exclude_id_patterns"})
-    return doc.get("patterns", []) if doc else []
-
-
-def should_exclude_id(id_value: int) -> bool:
-    """Check if an ID should be excluded based on filters."""
-    id_str = str(id_value)
-    
-    # Check exact exclusions
-    excluded_ids = get_excluded_ids()
-    if id_str in excluded_ids:
-        return True
-    
-    # Check pattern exclusions (contains)
-    excluded_patterns = get_excluded_id_patterns()
-    for pattern in excluded_patterns:
-        if pattern and pattern.lower() in id_str.lower():
-            return True
-    
-    return False
-
-
-def apply_id_filters(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Filter out documents based on ID exclusion rules."""
-    return [doc for doc in docs if not should_exclude_id(doc.get("id", 0))]
 
 
 # ----------------------------------------------------------------------
@@ -157,19 +117,6 @@ class AutomationStatus(BaseModel):
 
 class AutomationUpdate(BaseModel):
     automation_enabled: bool
-
-
-# --- NEW: ID Exclusion filter models ---
-class ExclusionFilters(BaseModel):
-    exclude_ids: List[str]
-    exclude_id_patterns: List[str]
-
-
-class ExclusionFiltersResponse(BaseModel):
-    exclude_ids: List[str]
-    exclude_id_patterns: List[str]
-    total_excluded_ids: int
-    total_patterns: int
 
 
 # ----------------------------------------------------------------------
@@ -279,16 +226,13 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
     return {"status": "success", "id": doc["id"]}
 
 
-# 🔹 GET /contacts (UPDATED: Apply ID filters)
+# 🔹 GET /contacts
 @app.get("/contacts", response_model=List[ContactSummary])
 def list_contacts(only_follow_up: bool = Query(False)):
 
     docs = list(
         messages_col.find().sort([("phone", ASCENDING), ("timestamp", DESCENDING)])
     )
-    
-    # NEW: Apply ID exclusion filters
-    docs = apply_id_filters(docs)
 
     latest_per_phone: Dict[str, Dict[str, Any]] = {}
     followups: Dict[str, bool] = {}
@@ -322,7 +266,7 @@ def list_contacts(only_follow_up: bool = Query(False)):
     return contacts
 
 
-# 🔹 GET /conversation/{phone} (UPDATED: Apply ID filters)
+# 🔹 GET /conversation/{phone}
 @app.get("/conversation/{phone}", response_model=List[ConversationMessage])
 def get_conversation(phone: str, limit: int = 50, offset: int = 0):
 
@@ -333,10 +277,6 @@ def get_conversation(phone: str, limit: int = 50, offset: int = 0):
         .limit(limit)
     )
     docs = list(cursor)
-    
-    # NEW: Apply ID exclusion filters
-    docs = apply_id_filters(docs)
-    
     return [doc_to_message(d) for d in docs]
 
 
@@ -420,98 +360,12 @@ def set_automation(phone: str, update: AutomationUpdate):
 
 
 # ----------------------------------------------------------------------
-# NEW: ID Exclusion Filter Routes
-# ----------------------------------------------------------------------
-
-# 🔹 GET /filters/exclusions
-@app.get("/filters/exclusions", response_model=ExclusionFiltersResponse)
-def get_exclusion_filters():
-    """Get current ID exclusion filters."""
-    exclude_ids = get_excluded_ids()
-    exclude_patterns = get_excluded_id_patterns()
-    
-    return ExclusionFiltersResponse(
-        exclude_ids=exclude_ids,
-        exclude_id_patterns=exclude_patterns,
-        total_excluded_ids=len(exclude_ids),
-        total_patterns=len(exclude_patterns)
-    )
-
-
-# 🔹 POST /filters/exclusions
-@app.post("/filters/exclusions", response_model=ExclusionFiltersResponse)
-def update_exclusion_filters(filters: ExclusionFilters):
-    """Update ID exclusion filters."""
-    
-    # Clean and deduplicate IDs
-    clean_ids = list(set([str(id_val).strip() for id_val in filters.exclude_ids if str(id_val).strip()]))
-    
-    # Clean and deduplicate patterns
-    clean_patterns = list(set([p.strip() for p in filters.exclude_id_patterns if p and p.strip()]))
-    
-    # Update exact IDs filter
-    filters_col.update_one(
-        {"filter_type": "exclude_exact_ids"},
-        {
-            "$set": {
-                "filter_type": "exclude_exact_ids",
-                "ids": clean_ids,
-                "updated_at": datetime.utcnow(),
-            }
-        },
-        upsert=True,
-    )
-    
-    # Update pattern filter
-    filters_col.update_one(
-        {"filter_type": "exclude_id_patterns"},
-        {
-            "$set": {
-                "filter_type": "exclude_id_patterns",
-                "patterns": clean_patterns,
-                "updated_at": datetime.utcnow(),
-            }
-        },
-        upsert=True,
-    )
-    
-    return ExclusionFiltersResponse(
-        exclude_ids=clean_ids,
-        exclude_id_patterns=clean_patterns,
-        total_excluded_ids=len(clean_ids),
-        total_patterns=len(clean_patterns)
-    )
-
-
-# 🔹 DELETE /filters/exclusions
-@app.delete("/filters/exclusions", response_model=DeleteResponse)
-def clear_exclusion_filters():
-    """Clear all ID exclusion filters."""
-    result1 = filters_col.delete_one({"filter_type": "exclude_exact_ids"})
-    result2 = filters_col.delete_one({"filter_type": "exclude_id_patterns"})
-    
-    total_deleted = result1.deleted_count + result2.deleted_count
-    
-    return DeleteResponse(
-        success=True,
-        message="All ID exclusion filters cleared",
-        deleted_count=total_deleted
-    )
-
-
-# ----------------------------------------------------------------------
 # ROOT
 # ----------------------------------------------------------------------
 @app.get("/")
 def root():
     return {
         "message": "WhatsApp Chat Logger API (MongoDB Version)",
-        "version": "3.2",
-        "features": [
-            "Message logging",
-            "Conversation management",
-            "Automation toggles",
-            "ID exclusion filters"
-        ]
+        "version": "3.1",
     }
 
