@@ -1,4 +1,3 @@
-
 # main.py
 from datetime import datetime
 from typing import Optional, List, Dict, Any
@@ -21,6 +20,7 @@ db = client["dashboard_db"]          # Database name
 
 messages_col = db["messages"]        # Collection: all messages
 automation_col = db["automation_settings"]  # Collection: per-phone automation flag
+alerts_col = db["new_message_alerts"]  # Collection: unread message alerts
 
 # Indexes (important for speed)
 messages_col.create_index([("id", ASCENDING)], unique=True)
@@ -28,6 +28,7 @@ messages_col.create_index([("phone", ASCENDING)])
 messages_col.create_index([("timestamp", DESCENDING)])
 
 automation_col.create_index([("phone", ASCENDING)], unique=True)
+alerts_col.create_index([("phone", ASCENDING)], unique=True)
 
 
 def get_next_message_id() -> int:
@@ -360,12 +361,48 @@ def set_automation(phone: str, update: AutomationUpdate):
 
 
 # ----------------------------------------------------------------------
+# NEW: Alert Management Routes
+# ----------------------------------------------------------------------
+
+# 🔹 GET /alerts/{phone}
+@app.get("/alerts/{phone}")
+def get_alert_status(phone: str):
+    doc = alerts_col.find_one({"phone": phone})
+    has_alert = bool(doc.get("has_alert", False)) if doc else False
+    return {"phone": phone, "has_alert": has_alert}
+
+
+# 🔹 POST /alerts/{phone}
+@app.post("/alerts/{phone}")
+def set_alert_status(phone: str, has_alert: bool = Query(True)):
+    alerts_col.update_one(
+        {"phone": phone},
+        {"$set": {"phone": phone, "has_alert": has_alert, "updated_at": datetime.utcnow()}},
+        upsert=True
+    )
+    return {"phone": phone, "has_alert": has_alert}
+
+
+# 🔹 DELETE /alerts/{phone}
+@app.delete("/alerts/{phone}")
+def clear_alert(phone: str):
+    alerts_col.delete_one({"phone": phone})
+    return {"phone": phone, "has_alert": False}
+
+
+# 🔹 GET /alerts (get all alerts)
+@app.get("/alerts")
+def get_all_alerts():
+    docs = list(alerts_col.find({"has_alert": True}, {"_id": 0, "phone": 1}))
+    return {"alerts": [doc["phone"] for doc in docs]}
+
+
+# ----------------------------------------------------------------------
 # ROOT
 # ----------------------------------------------------------------------
 @app.get("/")
 def root():
     return {
         "message": "WhatsApp Chat Logger API (MongoDB Version)",
-        "version": "3.1",
+        "version": "3.2",
     }
-
