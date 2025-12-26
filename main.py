@@ -273,7 +273,7 @@ def get_conversation(phone: str, limit: int = 50, offset: int = 0):
 
     cursor = (
         messages_col.find({"phone": phone})
-        .sort("timestamp", ASCENDING)  # oldest -> newest
+        .sort("id", ASCENDING)
         .skip(offset)
         .limit(limit)
     )
