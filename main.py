@@ -26,6 +26,8 @@ alerts_col = db["new_message_alerts"]  # Collection: unread message alerts
 messages_col.create_index([("id", ASCENDING)], unique=True)
 messages_col.create_index([("phone", ASCENDING)])
 messages_col.create_index([("timestamp", DESCENDING)])
+messages_col.create_index([("meta_message_id", ASCENDING)])
+
 
 automation_col.create_index([("phone", ASCENDING)], unique=True)
 alerts_col.create_index([("phone", ASCENDING)], unique=True)
@@ -62,6 +64,7 @@ class LogMessage(BaseModel):
     automation: Optional[str] = None
     timestamp: Optional[datetime] = None
     follow_up_needed: Optional[bool] = False
+    meta_message_id: Optional[str] = None
 
 
 class LogMessageFromDashboard(BaseModel):
@@ -96,6 +99,7 @@ class ConversationMessage(BaseModel):
     follow_up_needed: bool
     handled_by: Optional[str]
     notes: Optional[str]
+    status: Optional[str]
 
 
 class UpdateMessage(BaseModel):
@@ -152,6 +156,7 @@ def doc_to_message(doc: Dict[str, Any]) -> ConversationMessage:
         follow_up_needed=bool(doc.get("follow_up_needed", False)),
         handled_by=doc.get("handled_by"),
         notes=doc.get("notes"),
+        status=doc.get("status")
     )
 
 
@@ -185,6 +190,8 @@ def log_message(payload: LogMessage):
         "follow_up_needed": bool(payload.follow_up_needed),
         "handled_by": None,
         "notes": None,
+        "meta_message_id": payload.meta_message_id,  # 🔑
+        "status": "sent"  # default initial state
     }
 
     messages_col.insert_one(doc)
@@ -220,11 +227,35 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
         "follow_up_needed": payload.follow_up_needed or False,
         "handled_by": payload.handled_by or "Dashboard User",
         "notes": payload.notes or "",
+        "status": "queued",
     }
 
     messages_col.insert_one(doc)
 
     return {"status": "success", "id": doc["id"]}
+
+@app.post("/meta/status")
+def meta_status(payload: dict):
+    try:
+        entry = payload["entry"][0]
+        change = entry["changes"][0]["value"]
+
+        status_event = change["statuses"][0]
+
+        meta_message_id = status_event["id"]
+        status = status_event["status"]  # sent | delivered | read | failed
+
+        result = messages_col.update_one(
+            {"meta_message_id": meta_message_id},
+            {"$set": {"status": status, "updated_at": datetime.utcnow()}}
+        )
+
+        if result.matched_count == 0:
+            print(f"⚠️ Status update for unknown meta_message_id: {meta_message_id}")
+        return {"success": True}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # 🔹 GET /contacts
