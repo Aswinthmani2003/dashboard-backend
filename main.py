@@ -21,12 +21,16 @@ db = client["dashboard_db"]          # Database name
 messages_col = db["messages"]        # Collection: all messages
 automation_col = db["automation_settings"]  # Collection: per-phone automation flag
 alerts_col = db["new_message_alerts"]  # Collection: unread message alerts
+contacts_col = db["contacts"]
+
+
 
 # Indexes (important for speed)
 messages_col.create_index([("id", ASCENDING)], unique=True)
 messages_col.create_index([("phone", ASCENDING)])
 messages_col.create_index([("timestamp", DESCENDING)])
 messages_col.create_index([("meta_message_id", ASCENDING)])
+contacts_col.create_index([("phone", ASCENDING)], unique=True)
 
 
 automation_col.create_index([("phone", ASCENDING)], unique=True)
@@ -85,6 +89,11 @@ class ContactSummary(BaseModel):
     last_time: datetime
     last_direction: str
     follow_up_open: bool
+
+class ContactCreate(BaseModel):
+    phone: str
+    display_name: str
+    notes: Optional[str] = ""
 
 
 class ConversationMessage(BaseModel):
@@ -286,7 +295,7 @@ def list_contacts(only_follow_up: bool = Query(False)):
         contacts.append(
             ContactSummary(
                 phone=phone,
-                client_name=m.get("client_name"),
+                client_name=get_contact_name(phone) or m.get("client_name"),
                 last_message=m["message"],
                 last_time=m["timestamp"],
                 last_direction=m["direction"],
@@ -296,6 +305,35 @@ def list_contacts(only_follow_up: bool = Query(False)):
 
     contacts.sort(key=lambda x: x.last_time, reverse=True)
     return contacts
+
+@app.post("/contacts")
+def create_contact(payload: ContactCreate):
+    contacts_col.update_one(
+        {"phone": payload.phone},
+        {
+            "$set": {
+                "phone": payload.phone,
+                "display_name": payload.display_name,
+                "notes": payload.notes,
+                "updated_at": datetime.utcnow(),
+            },
+            "$setOnInsert": {"created_at": datetime.utcnow()},
+        },
+        upsert=True
+    )
+    return {"success": True}
+
+@app.patch("/contacts/{phone}")
+def update_contact(phone: str, display_name: str):
+    contacts_col.update_one(
+        {"phone": phone},
+        {"$set": {"display_name": display_name, "updated_at": datetime.utcnow()}}
+    )
+    return {"success": True}
+
+def get_contact_name(phone: str) -> Optional[str]:
+    doc = contacts_col.find_one({"phone": phone})
+    return doc.get("display_name") if doc else None
 
 
 # 🔹 GET /conversation/{phone}
