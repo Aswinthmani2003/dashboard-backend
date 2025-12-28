@@ -326,9 +326,19 @@ def create_contact(payload: ContactCreate):
 @app.patch("/contacts/{phone}")
 def update_contact(phone: str, display_name: str):
     contacts_col.update_one(
-        {"phone": phone},
-        {"$set": {"display_name": display_name, "updated_at": datetime.utcnow()}}
-    )
+    {"phone": phone},
+    {
+        "$set": {
+            "phone": phone,
+            "display_name": display_name,
+            "updated_at": datetime.utcnow(),
+        },
+        "$setOnInsert": {
+            "created_at": datetime.utcnow()
+        }
+    },
+    upsert=True
+)
     return {"success": True}
 
 def get_contact_name(phone: str) -> Optional[str]:
