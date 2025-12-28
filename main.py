@@ -289,32 +289,27 @@ def list_contacts(only_follow_up: bool = Query(False)):
             followups[phone] = True
 
     contacts: List[ContactSummary] = []
+
     for phone, m in latest_per_phone.items():
         fu = followups[phone]
         if only_follow_up and not fu:
             continue
+
+        # 🔑 Fetch contact metadata safely
+        contact_doc = contacts_col.find_one({"phone": phone}) or {}
+
+        client_name = contact_doc.get("display_name") or m.get("client_name")
+        notes = contact_doc.get("notes", "")
+
         contacts.append(
             ContactSummary(
                 phone=phone,
-                contact_doc = contacts_col.find_one({"phone": phone})
-                client_name = contact_doc.get("display_name") if contact_doc else m.get("client_name")
-                notes = contact_doc.get("notes") if contact_doc else ""
-
-                contacts.append(
-                    ContactSummary(
-                        phone=phone,
-                        client_name=client_name,
-                        last_message=m["message"],
-                        last_time=m["timestamp"],
-                        last_direction=m["direction"],
-                        follow_up_open=fu,
-                        notes=notes,
-                    )
-                )        
+                client_name=client_name,
                 last_message=m["message"],
                 last_time=m["timestamp"],
                 last_direction=m["direction"],
                 follow_up_open=fu,
+                notes=notes,
             )
         )
 
