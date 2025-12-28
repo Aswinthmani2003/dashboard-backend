@@ -341,20 +341,16 @@ def create_contact(payload: ContactCreate):
 from fastapi import Query
 
 @app.patch("/contacts/{phone}")
-def update_contact(
-    phone: str,
-    display_name: str = Query(..., min_length=1)
-):
-    result = contacts_col.update_one(
+def update_contact(phone: str, display_name: str):
+    contacts_col.update_one(
         {"phone": phone},
         {
             "$set": {
-                "display_name": display_name.strip(),
+                "display_name": display_name,
                 "updated_at": datetime.utcnow(),
             },
             "$setOnInsert": {
-                "phone": phone,
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.utcnow()
             }
         },
         upsert=True
