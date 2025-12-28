@@ -89,6 +89,7 @@ class ContactSummary(BaseModel):
     last_time: datetime
     last_direction: str
     follow_up_open: bool
+    notes: Optional[str] = ""
 
 class ContactCreate(BaseModel):
     phone: str
@@ -295,7 +296,21 @@ def list_contacts(only_follow_up: bool = Query(False)):
         contacts.append(
             ContactSummary(
                 phone=phone,
-                client_name=get_contact_name(phone) or m.get("client_name"),
+                contact_doc = contacts_col.find_one({"phone": phone})
+                client_name = contact_doc.get("display_name") if contact_doc else m.get("client_name")
+                notes = contact_doc.get("notes") if contact_doc else ""
+
+                contacts.append(
+                    ContactSummary(
+                        phone=phone,
+                        client_name=client_name,
+                        last_message=m["message"],
+                        last_time=m["timestamp"],
+                        last_direction=m["direction"],
+                        follow_up_open=fu,
+                        notes=notes,
+                    )
+                )        
                 last_message=m["message"],
                 last_time=m["timestamp"],
                 last_direction=m["direction"],
@@ -323,22 +338,28 @@ def create_contact(payload: ContactCreate):
     )
     return {"success": True}
 
+from fastapi import Query
+
 @app.patch("/contacts/{phone}")
-def update_contact(phone: str, display_name: str):
-    contacts_col.update_one(
-    {"phone": phone},
-    {
-        "$set": {
-            "phone": phone,
-            "display_name": display_name,
-            "updated_at": datetime.utcnow(),
+def update_contact(
+    phone: str,
+    display_name: str = Query(..., min_length=1)
+):
+    result = contacts_col.update_one(
+        {"phone": phone},
+        {
+            "$set": {
+                "display_name": display_name.strip(),
+                "updated_at": datetime.utcnow(),
+            },
+            "$setOnInsert": {
+                "phone": phone,
+                "created_at": datetime.utcnow(),
+            }
         },
-        "$setOnInsert": {
-            "created_at": datetime.utcnow()
-        }
-    },
-    upsert=True
-)
+        upsert=True
+    )
+
     return {"success": True}
 
 def get_contact_name(phone: str) -> Optional[str]:
