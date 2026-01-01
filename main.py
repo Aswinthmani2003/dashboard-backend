@@ -1,5 +1,6 @@
 # main.py
 from datetime import datetime
+from datetime import timedelta
 from typing import Optional, List, Dict, Any
 import os
 
@@ -31,7 +32,9 @@ messages_col.create_index([("phone", ASCENDING)])
 messages_col.create_index([("timestamp", DESCENDING)])
 messages_col.create_index([("meta_message_id", ASCENDING)])
 contacts_col.create_index([("phone", ASCENDING)], unique=True)
-
+messages_col.create_index(
+    [("phone", ASCENDING), ("direction", ASCENDING), ("timestamp", DESCENDING)]
+)
 
 automation_col.create_index([("phone", ASCENDING)], unique=True)
 alerts_col.create_index([("phone", ASCENDING)], unique=True)
@@ -150,6 +153,23 @@ def normalize_direction(raw: str) -> str:
         return "bot"
 
     raise HTTPException(status_code=400, detail=f"Invalid direction: {raw}")
+
+def is_whatsapp_session_active(phone: str) -> bool:
+    """
+    WhatsApp session is active ONLY if last USER message
+    is within the last 24 hours.
+    """
+    last_user_msg = messages_col.find_one(
+        {"phone": phone, "direction": "user"},
+        sort=[("timestamp", -1)],
+        projection={"timestamp": 1}
+    )
+
+    if not last_user_msg:
+        return False  # User never messaged → no session
+
+    last_time = last_user_msg["timestamp"]
+    return datetime.utcnow() - last_time <= timedelta(hours=24)
 
 
 def doc_to_message(doc: Dict[str, Any]) -> ConversationMessage:
@@ -432,6 +452,14 @@ def get_automation(phone: str):
     enabled = get_automation_enabled_for_phone(phone)
     return AutomationStatus(phone=phone, automation_enabled=enabled)
 
+# 🔹 GET /session/{phone}
+@app.get("/session/{phone}")
+def get_session_status(phone: str):
+    active = is_whatsapp_session_active(phone)
+    return {
+        "phone": phone,
+        "session_active": active
+    }
 
 # 🔹 PATCH /automation/{phone}
 @app.patch("/automation/{phone}", response_model=AutomationStatus)
