@@ -155,10 +155,6 @@ def normalize_direction(raw: str) -> str:
     raise HTTPException(status_code=400, detail=f"Invalid direction: {raw}")
 
 def is_whatsapp_session_active(phone: str) -> bool:
-    """
-    WhatsApp session is active ONLY if last USER message
-    is within the last 24 hours.
-    """
     last_user_msg = messages_col.find_one(
         {"phone": phone, "direction": "user"},
         sort=[("timestamp", -1)],
@@ -166,7 +162,7 @@ def is_whatsapp_session_active(phone: str) -> bool:
     )
 
     if not last_user_msg:
-        return False  # User never messaged → no session
+        return False
 
     last_time = last_user_msg["timestamp"]
     return datetime.utcnow() - last_time <= timedelta(hours=24)
@@ -455,11 +451,11 @@ def get_automation(phone: str):
 # 🔹 GET /session/{phone}
 @app.get("/session/{phone}")
 def get_session_status(phone: str):
-    active = is_whatsapp_session_active(phone)
     return {
         "phone": phone,
-        "session_active": active
+        "session_active": is_whatsapp_session_active(phone)
     }
+
 
 # 🔹 PATCH /automation/{phone}
 @app.patch("/automation/{phone}", response_model=AutomationStatus)
