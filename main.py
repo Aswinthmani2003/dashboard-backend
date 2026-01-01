@@ -283,6 +283,13 @@ def meta_status(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@app.route("/api/session/<phone>")
+def get_session_status(phone):
+    active = is_whatsapp_session_active(phone)
+    return jsonify({
+        "session_active": active
+    })
+
 
 # 🔹 GET /contacts
 @app.get("/contacts", response_model=List[ContactSummary])
