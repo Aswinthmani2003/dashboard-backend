@@ -260,6 +260,22 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
 
     return {"status": "success", "id": doc["id"]}
 
+@app.post("/api/log_template_message")
+def log_template_message():
+    data = request.json
+
+    insert_message({
+        "phone": data["phone"],
+        "message": data["message"],
+        "direction": "sent",
+        "type": "template",
+        "status": "sent",
+        "handled_by": "system",
+        "timestamp": datetime.utcnow()
+    })
+
+    return {"ok": True}
+
 @app.post("/meta/status")
 def meta_status(payload: dict):
     try:
