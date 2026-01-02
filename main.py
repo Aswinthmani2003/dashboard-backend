@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pymongo import MongoClient, ASCENDING, DESCENDING
+from fastapi import Request
 
 # ----------------------------------------------------------------------
 # MongoDB setup (NO FALLBACK — MUST BE SET IN ENV)
@@ -261,20 +262,27 @@ def log_message_from_dashboard(payload: LogMessageFromDashboard):
     return {"status": "success", "id": doc["id"]}
 
 @app.post("/api/log_template_message")
-def log_template_message():
-    data = request.json
+async def log_template_message(request: Request):
+    data = await request.json()
 
-    insert_message({
+    doc = {
+        "id": get_next_message_id(),
         "phone": data["phone"],
+        "client_name": data.get("client_name"),
+        "direction": "bot",                 # template is outbound
         "message": data["message"],
-        "direction": "sent",
-        "type": "template",
-        "status": "sent",
+        "media_url": None,
+        "automation": "template",
+        "timestamp": datetime.utcnow(),
+        "follow_up_needed": False,
         "handled_by": "system",
-        "timestamp": datetime.utcnow()
-    })
+        "notes": "Template message",
+        "status": "sent",
+        "meta_message_id": data.get("meta_message_id"),
+    }
 
-    return {"ok": True}
+    messages_col.insert_one(doc)
+    return {"success": True, "id": doc["id"]}
 
 @app.post("/meta/status")
 def meta_status(payload: dict):
@@ -299,12 +307,12 @@ def meta_status(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.route("/api/session/<phone>")
-def get_session_status(phone):
-    active = is_whatsapp_session_active(phone)
-    return jsonify({
-        "session_active": active
-    })
+@app.get("/session/{phone}")
+def get_session_status(phone: str):
+    return {
+        "phone": phone,
+        "session_active": is_whatsapp_session_active(phone)
+    }
 
 
 # 🔹 GET /contacts
